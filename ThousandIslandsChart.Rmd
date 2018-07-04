@@ -1,0 +1,52 @@
+---
+title: "Interactive Thousand Islands Map"
+author: "Steve Wilkins-Reeves"
+date: '2018-07-03'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Using the "leaflet" package and the cleaned data frame from "Island Group Analysis.rmd"
+This displays a searchable map of the islands in the thousand islands.
+Thank you to Thousand Islands Life for the [data set.](http://www.thousandislandslife.com/Portals/Properties/island_names_dec2008.htm). 
+For further information regarding the map, email me at steven.wilkins.reeves@gmail.com with Thousand Islands in the subject line. This map is not for navigational purposes. 
+
+
+
+```{r packages, echo=FALSE, message = FALSE, warning=FALSE}
+load("isl.rda") #loading cleaned data frame
+library(leaflet)
+library(htmltools)
+library(leaflet.extras)
+library(dplyr)
+```
+
+```{r echo = FALSE}
+islCAN <- filter(isl, isl$Nationality == 'Canada')
+islUSA <- filter(isl, isl$Nationality == 'US')
+chart <- leaflet() %>%
+  addProviderTiles("Esri") %>%
+  addCircles(data = islCAN, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = "red",
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, popup = ~paste0(Name, '<br/> Local Names: ', `Local Name`, '<br/> Ports?: ', `Ports?`, '<br/> Island Group: ', Group, '<br/> Duplicate Name?: ', Duplicate)) %>%
+  addLabelOnlyMarkers(data = islCAN, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), group = "CAN") %>%
+  addCircles(data = islUSA, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = "blue",
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, popup = ~paste0(Name, '<br/> Local Names: ', `Local Name`, '<br/> Ports?: ', `Ports?`, '<br/> Island Group: ', Group, '<br/> Duplicate Name?: ', Duplicate)) %>%
+  addLabelOnlyMarkers(data = islUSA, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), group = "USA") %>%
+  addLayersControl(overlayGroups = c("CAN", "USA")) %>%
+  addResetMapButton() %>%
+  #addSearchOSM() %>% 
+  #addReverseSearchOSM() %>%
+  addSearchFeatures(
+    targetGroups  = c('CAN', 'USA'),
+    options = searchFeaturesOptions(zoom=15, openPopup=TRUE)) %>%
+  setView(lng = islCAN$NumLong[206], lat = islCAN$NumLat[206], zoom = 10)  #Setting the initial View at Hill Island
+
+  
+
+chart
+
+```
+
