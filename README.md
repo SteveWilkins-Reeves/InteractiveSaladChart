@@ -10,5 +10,9 @@ The file 'ThousandIslandsChart.Rmd' contains the code which generates the intera
 
 ThousandIslandsChart.html is a working version of the output.  
 
+To render the output, paste the url of the html file to: 
+http://htmlpreview.github.io/
+
+
 
 
