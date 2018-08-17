@@ -1,7 +1,7 @@
 ---
 title: "Interactive Thousand Islands Map"
 author: "Steve Wilkins-Reeves"
-date: '2018-07-03'
+date: '2018-08-17'
 output: html_document
 ---
 
@@ -11,8 +11,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Using the "leaflet" package and the cleaned data frame from "Island Group Analysis.rmd"
 This displays a searchable map of the islands in the thousand islands.
-Thank you to Thousand Islands Life for the [data set.](http://www.thousandislandslife.com/Portals/Properties/island_names_dec2008.htm). 
-For further information regarding the map, email me at steven.wilkins.reeves@gmail.com with Thousand Islands in the subject line. This map is not for navigational purposes. 
+Thank you to Thousand Islands Life for the [data set.](http://www.thousandislandslife.com/Portals/Properties/island_names_dec2008.htm)
+For further information regarding the map, email me at steven.wilkins.reeves@gmail.com with Thousand Islands Map in the subject line. This map is not for navigational purposes. 
 
 
 
@@ -22,9 +22,11 @@ library(leaflet)
 library(htmltools)
 library(leaflet.extras)
 library(dplyr)
+library(ggplot2)
 ```
 
-```{r echo = FALSE}
+```{r First Islands Chart With Island Feature Labels,echo = FALSE}
+# Creating the basic Canada/US Island layered map 
 islCAN <- filter(isl, isl$Nationality == 'Canada')
 islUSA <- filter(isl, isl$Nationality == 'US')
 chart <- leaflet() %>%
@@ -37,8 +39,6 @@ chart <- leaflet() %>%
   addLabelOnlyMarkers(data = islUSA, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), group = "USA") %>%
   addLayersControl(overlayGroups = c("CAN", "USA")) %>%
   addResetMapButton() %>%
-  #addSearchOSM() %>% 
-  #addReverseSearchOSM() %>%
   addSearchFeatures(
     targetGroups  = c('CAN', 'USA'),
     options = searchFeaturesOptions(zoom=15, openPopup=TRUE)) %>%
@@ -49,4 +49,288 @@ chart <- leaflet() %>%
 chart
 
 ```
+
+
+# Clustering of the Islands
+
+We now wish to look at the clustering of the islands.  We will have to include only the features with island in the title. 
+Additionally because the distance associated with latitude and longitude are not equal, we nedd a ratio conversion to appropriately scale them on the same difference.  (The latitude is relatively constant in the area so we can just use a constant). [Conversion Source.](https://en.wikipedia.org/wiki/Latitude)
+
+```{r Conversion To Equal Distance Measure, output=FALSE, message = FALSE, warning=FALSE}
+clusterset <- isl[,c('Name','Group','NumLat','NumLong')]
+setlat <- clusterset[(clusterset$Name == 'Hill Island'),'NumLat']
+ratio = as.numeric(110.574/(111.320*cos(setlat))) # Converts longitude to the same scale as latitude by multiplying
+clusterset$MetLong <- ratio*clusterset$NumLong
+clusterset$MetLat <- clusterset$NumLat
+clusterset <- clusterset[grepl('Island', clusterset$Name),] #Now we have a reduced data set with a subset of them labeled with known groups. 
+
+clustersubset <- clusterset[, c('MetLat', 'MetLong')]
+
+```
+
+
+# Clustering Methods
+
+First we look at the [k-means](https://en.wikipedia.org/wiki/K-means_clustering) clustering algorithm. 
+
+```{r K Means, echo=FALSE, message = FALSE, warning=FALSE}
+library(cluster)
+library(ggplot2)
+kmeanslist = list()
+ssvec = c()
+for(i in 1:20) {
+  kmeanslist[[i]] <- kmeans(clustersubset, centers = i, nstart = 25)
+  ssvec[i] <- kmeanslist[[i]]$tot.withinss
+}
+# Using the total within sum of square distance we will determin an optimal cluster number using an elbow plot.
+x = 1:20
+classdist <- data.frame(x, ssvec)
+ggplot(classdist, aes(x = x, y = ssvec) ) +
+  geom_line() +
+  xlab('K means number of groups') + 
+  ylab('Sum of Squares Error') + 
+  ggtitle('K Means Error')
+  
+k4means <- kmeanslist[[4]]$cluster
+```
+
+
+
+Viewing the plot gives us an idea of an optimal number of clusters of 4.  Though based on the local knowledge of the Island groups in the area, there should be many more groups.  
+
+[Agglomerative Hierrachical clustering](https://en.wikipedia.org/wiki/Hierarchical_clustering) is used next.  The complete method for clustering based on the Euclidian distances are used in this case.  
+
+```{r Agglomerative Hierarchical clustering, echo=FALSE, message = FALSE, warning=FALSE}
+#Here we use Hierarchical Clustering to determin an optimal number of groups
+hclusters <- hclust(dist(clustersubset), method = 'complete') #complete is the default style and is the one used (seems to reduce unbalanced classes)
+plot(hclusters, main = 'Hierarchica, Clustering', xlab = 'Islands') 
+
+h4clusters <- cutree(hclusters, k = 4)
+h9clusters <- cutree(hclusters, k = 9)
+
+```
+
+4 - 9 clusters seem appropriate based on the tree diagram displayed.  
+
+There is the issue however, of the data having a strong anisotropy in its variance.  Ie.  most of the variance in the position of the islands is along the length of the river, and not just in any direction. Therefore steps should be taken to compensate for this fact. 
+
+Some options which may be more appropriate are: Gaussian Mixture Models. In which we have a variance updated each time in our model.  Another idea may be to use the [Mahalabnobis distance](https://en.wikipedia.org/wiki/Mahalanobis_distance) for scaling the distances between each island, by the variance of the whole set. 
+
+We wish to change the output of the distances output function so that we have an output similar to that of dist() so it can be input to the hclust() function. Luckly I have found an [example](https://stackoverflow.com/questions/18658961/mahalanobis-distance-in-r) of this function already made. 
+
+
+
+
+```{r Distance Function, echo= FALSE, message = FALSE, warning=FALSE}
+# Thank you to https://stackoverflow.com/questions/18658961/mahalanobis-distance-in-r 
+# for a function using a mahalanobis distance applied which can be used by the hclust() function 
+
+# x - data frame
+# cx - covariance matrix; if not provided, 
+#      it will be estimated from the data
+
+mahDist <- function(x, cx = NULL) {
+  if(is.null(cx)) cx <- cov(x)
+  out <- lapply(1:nrow(x), function(i) {
+    mahalanobis(x = x, 
+                center = do.call("c", x[i, ]),
+                cov = cx)
+  })
+  return(as.dist(do.call("rbind", out)))
+}
+
+```
+
+```{r Mahalanbis H Clust, echo = FALSE, message = FALSE, warning=FALSE}
+
+#Here we use Hierarchical Clustering to determin an optimal number of groups
+hMahClusters <- hclust(mahDist(clustersubset), method = 'complete') #complete is the default style and is the one used (seems to reduce unbalanced classes)
+plot(hMahClusters, main = 'Mahalanobis Scaled Clusters', xlab = 'Islands') 
+
+```
+
+Using this scale we find that there are clearly some outliers in the set of islands.  Let's observe the data without these outliers. 
+
+```{r Removal of Outliers, echo=FALSE, message = FALSE, warning=FALSE}
+
+OutlierIndex <- (cutree(hMahClusters, k = 2) == 2 ) 
+#Those in the first group are the non-outliers, and thus we will obtain a dataset without those. 
+clustersetOutliers <- clusterset
+clustersubsetOutliers <- clustersubset
+
+
+clustersetOutliers$Outlier <- OutlierIndex
+clustersubsetOutliers$Outlier <- OutlierIndex
+clustersetNoOutliers <- clusterset[!OutlierIndex,]
+clustersubsetNoOutliers <- clustersubset[!OutlierIndex,]
+
+```
+
+We will compare the chart to see which islands or features were these identified outliers.
+
+
+
+```{r Map of Outliers, echo=FALSE, message = FALSE, warning=FALSE}
+# Creating the Outlier Map
+islNonOutlier <- filter(clustersetOutliers, !clustersetOutliers$Outlier)
+islOutlier <- filter(clustersetOutliers, clustersetOutliers$Outlier)
+chartWithOutliers <- leaflet() %>%
+  addProviderTiles("Esri") %>%
+  addCircles(data = islNonOutlier, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = "red",
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "Islands") %>%
+  addCircles(data = islOutlier, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = "blue",
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "Outliers") %>%
+  addLayersControl(overlayGroups = c("Islands", "Outliers")) %>%
+  addResetMapButton() %>%
+  addSearchFeatures(
+    targetGroups  = c('Islands', 'Outliers'),
+    options = searchFeaturesOptions(zoom=15, openPopup=TRUE)) %>%
+  setView(lng = islCAN$NumLong[206], lat = islCAN$NumLat[206], zoom = 10)  #Setting the initial View at Hill Island
+
+chartWithOutliers
+```
+
+
+Looking at the identified islands in the chart it appears that this method has correctly identified the outliers.  In this case that turned out to be the islands included in the dataset which were outside of the St. Lawrence River. 
+
+Next we will redo the clustering without those outliers to attempt to find natural groups in the set of islands. Using Agglomerative Hierarchical Clustering based on the Mahalanobis distances.
+
+
+```{r}
+
+#Here we use Hiearchical Clustering without the outliers 
+hMahClusters <- hclust(mahDist(clustersubsetNoOutliers), method = 'complete') #complete is the default style and is the one used (seems to reduce unbalanced classes)
+plot(hMahClusters, main = 'Mahalanobis Scaled Agglomerative Hierarchical Clustering', xlab = 'Islands') 
+
+
+```
+
+
+With this method we appear to have 5 - 8 clusters as optimal, however as before, with local knowledge there should be greater than 10 clusters.  
+
+
+
+We will visualize the different numbers of clusters and Methods and see what it looks like on a map.  
+K means, Gaussian Mixture Models and Mahalanobis Scaled Hierarchical Clustering methods are used. 
+Each of the methods have options on the chart for 4,8,12,16 or 20 clusters. 
+
+```{r Repeat K Means for Map, echo = FALSE, message = FALSE, warning=FALSE}
+library(cluster)
+kmeanslist = list()
+ssvec = c()
+for(i in 1:20) {
+  kmeanslist[[i]] <- kmeans(clustersubsetNoOutliers, centers = i, nstart = 25)
+  ssvec[i] <- kmeanslist[[i]]$tot.withinss
+}
+
+
+```
+
+
+```{r Final Layered Cluster Map, echo= FALSE, message = FALSE, warning=FALSE}
+library(mclust)
+set.seed(42)
+clustersetNoOutliers$HC4 <- cutree(hMahClusters, k = 4)
+clustersetNoOutliers$HC8 <- cutree(hMahClusters, k = 8)
+clustersetNoOutliers$HC12 <- cutree(hMahClusters, k = 12)
+clustersetNoOutliers$HC16 <- cutree(hMahClusters, k = 16)
+clustersetNoOutliers$HC20 <- cutree(hMahClusters, k = 20)
+
+clustersetNoOutliers$KM4 <- kmeanslist[[4]]$cluster
+clustersetNoOutliers$KM8 <- kmeanslist[[8]]$cluster
+clustersetNoOutliers$KM12 <- kmeanslist[[12]]$cluster
+clustersetNoOutliers$KM16 <- kmeanslist[[16]]$cluster
+clustersetNoOutliers$KM20 <- kmeanslist[[20]]$cluster
+
+clustersetNoOutliers$GMM4 <-  Mclust(clustersubsetNoOutliers, 4)$classification
+clustersetNoOutliers$GMM8 <-  Mclust(clustersubsetNoOutliers, 8)$classification
+clustersetNoOutliers$GMM12 <-  Mclust(clustersubsetNoOutliers, 12)$classification
+clustersetNoOutliers$GMM16 <-  Mclust(clustersubsetNoOutliers, 16)$classification
+clustersetNoOutliers$GMM20 <-  Mclust(clustersubsetNoOutliers, 20)$classification
+
+colorset <- 'inferno' #  'plasma'
+
+palNat <- colorFactor(palette = colorset, domain = clustersetNoOutliers$Group)
+
+palHC4 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$HC4)
+palHC8 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$HC8)
+palHC12 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$HC12)
+palHC16 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$HC16)
+palHC20 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$HC20)
+
+palKM4 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$KM4)
+palKM8 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$KM8)
+palKM12 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$KM12)
+palKM16 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$KM16)
+palKM20 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$KM20)
+
+palGMM4 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$GMM4)
+palGMM8 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$GMM8)
+palGMM12 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$GMM12)
+palGMM16 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$GMM16)
+palGMM20 <- colorFactor(palette = colorset, domain = clustersetNoOutliers$GMM20)
+
+
+
+chartHClust5 <- leaflet() %>%
+  addProviderTiles("Esri") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palHC4(HC4),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "4 Hierarchical Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palHC8(HC8),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "8 Hierarchical Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palHC12(HC12),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "12 Hierarchical Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palHC16(HC16),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "16 Hierarchical Clusters") %>%  
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palHC20(HC20),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "20 Hierarchical Clusters") %>%   
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palKM4(KM4),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "4 KM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palKM8(KM8),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "8 KM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palKM12(KM12),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "12 KM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palKM16(KM16),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "16 KM Clusters") %>%  
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palKM20(KM20),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "20 KM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palGMM4(GMM4),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "4 GMM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palGMM8(GMM8),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "8 GMM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palGMM12(GMM12),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "12 GMM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palGMM16(GMM16),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "16 GMM Clusters") %>%  
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palGMM20(GMM20),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "20 GMM Clusters") %>%
+  addCircles(data = clustersetNoOutliers, lng = ~NumLong, lat = ~NumLat, label = ~htmlEscape(Name), color = ~ palNat(Group),
+  weight = 5, opacity = 0.5, stroke = 1, radius = 10, group = "Natural Groups") %>%
+  addLayersControl(baseGroups = c("4 Hierarchical Clusters", "8 Hierarchical Clusters", "12 Hierarchical Clusters", "16 Hierarchical Clusters", "20 Hierarchical Clusters", "4 KM Clusters", "8 KM Clusters", "12 KM Clusters", "16 KM Clusters", "20 KM Clusters", "4 GMM Clusters", "8 GMM Clusters", "12 GMM Clusters", "16 GMM Clusters", "20 GMM Clusters", "Natural Groups")) %>%
+  addResetMapButton() %>%
+  addSearchFeatures(
+    targetGroups  = c("4 Hierarchical Clusters", "8 Hierarchical Clusters", "12 Hierarchical Clusters", "16 Hierarchical Clusters", "20 Hierarchical Clusters", "4 KM Clusters", "8 KM Clusters", "12 KM Clusters", "16 KM Clusters", "20 KM Clusters", "4 GMM Clusters", "8 GMM Clusters", "12 GMM Clusters", "16 GMM Clusters", "20 GMM Clusters", "Natural Groups"),
+    options = searchFeaturesOptions(zoom=15, openPopup=TRUE)) %>%
+  setView(lng = islCAN$NumLong[206], lat = islCAN$NumLat[206], zoom = 10)  #Setting the initial View at Hill Island
+
+chartHClust5
+
+```
+
+
+# Conclusions
+The natural island group data was hand collected and mostly includes islands on the Canadian side.  The Gaussian Mixture Model seemed to identify groups the most similar to the named island groups of the area. In fact it was able to capture the Lake Fleet Group, when using 12 or more groups, which the scaled Hierarchical Clustering model did not.  
+
+The Mahalanobis scaled distances for the Hierarchical Clustering seemed to capture the different island groups separated by the American and Canadian Sides. This is interesting though it is not surprising considering there is little variance perpendicular to the river.  
+
+The K means model was also able to capture the Lake Fleet group, and was the only method able to identify the Navy Island Group. However, it also tended to falsely group islands Across the river and across the Canadian/American border.  This also shouldn't be surprising considering the radial symmetry of the method.  It may be considered to scale the data, however since the distances used for the positions were on the same scale, this may not make sense and thus the data was left on the full distance scale. 
+
+Many other clustering methods could be investigated in the future.  One other method to consider may be the use of boundaries in the dataset.  Natural bounderies for the groups may be the shipping channels and international border.  Data regarding the position of the border may have to be collected via another source as well as algorithms adapted to be used for boundaries would need to be considered. 
+
+
+
+
+
+
+
 
